@@ -1,14 +1,13 @@
 import os
 import requests
 from dotenv import load_dotenv
-import time
-import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-load_dotenv()
+# Carrega as variáveis do arquivo .env
+load_dotenv('.env')
 
 # Carregando todas as variáveis do arquivo .env
 CONFLUENCE_URL = os.getenv("CONFLUENCE_URL")
-CONFLUENCE_USERNAME = os.getenv("CONFLUENCE_USERNAME")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
 CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
 
@@ -16,14 +15,6 @@ CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
 PDF_FOLDER = "kbs_confluence"
 if not os.path.exists(PDF_FOLDER):
     os.makedirs(PDF_FOLDER)
-
-def calcular_hash_arquivo(caminho_arquivo):
-    """Calcula o hash MD5 de um arquivo."""
-    hash_md5 = hashlib.md5()
-    with open(caminho_arquivo, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
 
 def verificar_kb_existente(page_id, title):
     """Verifica se o KB já existe na pasta e retorna o caminho se existir."""
@@ -51,13 +42,12 @@ def buscar_paginas_confluence():
         }
         
         headers = {
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {CONFLUENCE_API_TOKEN}'
         }
         
-        auth = (CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN)
-        
         try:
-            response = requests.get(url, params=params, headers=headers, auth=auth)
+            response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
             
@@ -93,11 +83,13 @@ def baixar_pdf_confluence(page_id, title):
         # URL para download direto do PDF
         url = f"{CONFLUENCE_URL}/spaces/flyingpdf/pdfpageexport.action?pageId={page_id}"
         
-        # Configuração da autenticação
-        auth = (CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN)
+        # Configuração da autenticação Bearer Token
+        headers = {
+            'Authorization': f'Bearer {CONFLUENCE_API_TOKEN}'
+        }
         
         # Faz o download do PDF
-        response = requests.get(url, auth=auth, stream=True)
+        response = requests.get(url, headers=headers, stream=True)
         response.raise_for_status()
         
         # Verifica se o conteúdo é realmente um PDF
@@ -125,37 +117,44 @@ def baixar_pdf_confluence(page_id, title):
             print(f"Resposta do servidor: {e.response.text}")
         return False
 
+def baixar_pdf_wrapper(page):
+    page_id = page['id']
+    title = page['title']
+    pdf_path = verificar_kb_existente(page_id, title)
+    if pdf_path:
+        return ('existente', title)
+    if baixar_pdf_confluence(page_id, title):
+        return ('baixado', title)
+    return ('erro', title)
+
 def processar_paginas_confluence():
     pages = buscar_paginas_confluence()
     pdfs_baixados = []
     pdfs_existentes = []
-    
+    pdfs_erro = []
+
     print(f"\n📁 Salvando PDFs na pasta: {PDF_FOLDER}")
     print(f"📚 Total de páginas encontradas: {len(pages)}")
-    
-    for i, page in enumerate(pages, 1):
-        page_id = page['id']
-        title = page['title']
-        
-        print(f"\n[{i}/{len(pages)}] Processando: {title}")
-        
-        # Verifica se o KB já existe
-        pdf_path = verificar_kb_existente(page_id, title)
-        if pdf_path:
-            pdfs_existentes.append(title)
-            continue
-        
-        if baixar_pdf_confluence(page_id, title):
-            pdfs_baixados.append(title)
-            # Pequena pausa para não sobrecarregar o servidor
-            time.sleep(1)
-    
-    return pdfs_baixados, pdfs_existentes
+
+    with ThreadPoolExecutor(max_workers=30) as executor:  # Ajuste max_workers conforme necessário
+        future_to_page = {executor.submit(baixar_pdf_wrapper, page): page for page in pages}
+        for i, future in enumerate(as_completed(future_to_page), 1):
+            status, title = future.result()
+            if status == 'baixado':
+                pdfs_baixados.append(title)
+                print(f"[{i}/{len(pages)}] Baixado: {title}")
+            elif status == 'existente':
+                pdfs_existentes.append(title)
+                print(f"[{i}/{len(pages)}] Já existe: {title}")
+            else:
+                pdfs_erro.append(title)
+                print(f"[{i}/{len(pages)}] Erro: {title}")
+
+    return pdfs_baixados, pdfs_existentes, pdfs_erro
 
 def validar_configuracao():
     variaveis_requeridas = {
         "CONFLUENCE_URL": CONFLUENCE_URL,
-        "CONFLUENCE_USERNAME": CONFLUENCE_USERNAME,
         "CONFLUENCE_API_TOKEN": CONFLUENCE_API_TOKEN,
         "CONFLUENCE_SPACE_KEY": CONFLUENCE_SPACE_KEY
     }
@@ -174,11 +173,12 @@ if __name__ == "__main__":
         exit(1)
         
     print("🚀 Iniciando download dos PDFs do Confluence...")
-    pdfs_baixados, pdfs_existentes = processar_paginas_confluence()
+    pdfs_baixados, pdfs_existentes, pdfs_erro = processar_paginas_confluence()
     
     print(f"\n✅ Processamento concluído!")
     print(f"📥 PDFs baixados: {len(pdfs_baixados)}")
     print(f"📄 PDFs já existentes: {len(pdfs_existentes)}")
+    print(f"❌ PDFs com erro: {len(pdfs_erro)}")
     
     if pdfs_baixados:
         print("\n📝 Novos PDFs baixados:")
@@ -188,4 +188,9 @@ if __name__ == "__main__":
     if pdfs_existentes:
         print("\n📝 PDFs já existentes:")
         for pdf in pdfs_existentes:
+            print(f"- {pdf}")
+    
+    if pdfs_erro:
+        print("\n📝 PDFs com erro:")
+        for pdf in pdfs_erro:
             print(f"- {pdf}") 

@@ -1,5 +1,10 @@
-azure-search-documents
-azure-storage-blob
-python-dotenv
-pypdf
-streamlit
+fastapi==0.109.2
+uvicorn==0.27.1
+python-dotenv==1.0.0
+requests==2.31.0
+azure-search-documents==11.4.0
+azure-core==1.30.0
+openai>=1.30.0
+PyPDF2==3.0.1
+scikit-learn>=1.4.0
+numpy>=1.24.0
